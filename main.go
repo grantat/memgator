@@ -153,7 +153,7 @@ var regs = map[string]*regexp.Regexp{
 	"memento": regexp.MustCompile(`\bmemento\b`),
 	"memdttm": regexp.MustCompile(`/(\d{14})/`),
 	"dttmstr": regexp.MustCompile(`^(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?$`),
-	"tmappth": regexp.MustCompile(`^timemap/(link|json|cdxj)/.+`),
+	"tmappth": regexp.MustCompile(`^timemap/(link|json|cdxj|summary)/.+`),
 	"tgatpth": regexp.MustCompile(`^timegate/.+`),
 	"descpth": regexp.MustCompile(`^(memento|api)/(link|json|cdxj|proxy)/(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?/.+`),
 	"rdrcpth": regexp.MustCompile(`^memento/(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?/.+`),
@@ -211,7 +211,7 @@ func splitLinks(lnkrcvd chan string, lnksplt chan string) {
 	}
 }
 
-func extractMementos(lnksplt chan string) (tml *list.List) {
+func extractMementos(lnksplt chan string, sess *Session) (tml *list.List) {
 	tml = list.New()
 	for lnk := range lnksplt {
 		lnk = strings.Trim(lnk, "<\" \t\n\r")
@@ -247,6 +247,8 @@ func extractMementos(lnksplt chan string) (tml *list.List) {
 		}
 		e := tml.Back()
 		for ; e != nil; e = e.Prev() {
+			// y, m := SomeStringSplit(link.Timestr)
+			// summarymap["period"][y][m] += 1
 			if link.Timestr > e.Value.(Link).Timestr {
 				tml.InsertAfter(link, e)
 				break
@@ -324,7 +326,7 @@ func fetchTimemap(urir string, arch *Archive, tmCh chan *list.List, wg *sync.Wai
 	lnksplt := make(chan string, 128)
 	lnkrcvd <- lnks
 	go splitLinks(lnkrcvd, lnksplt)
-	tml := extractMementos(lnksplt)
+	tml := extractMementos(lnksplt, sess)
 	tmCh <- tml
 	benchmarker(arch.ID, "extractmementos", fmt.Sprintf("%d Mementos extracted from %s", tml.Len(), arch.Name), start, sess)
 	logInfo.Printf("%s => Success: %d mementos", arch.ID, tml.Len())
@@ -417,23 +419,14 @@ func serializeLinks(urir string, basetm *list.List, format string, dataCh chan s
 	}
 }
 
-func aggregateTimemap(urir string, dttmp *time.Time, sess *Session) (basetm *list.List) {
-	var wg sync.WaitGroup
-	tmCh := make(chan *list.List, len(archives))
-	for i, arch := range archives {
-		if i == *topk {
-			break
-		}
-		if arch.Dormant {
-			continue
-		}
-		wg.Add(1)
-		go fetchTimemap(urir, &archives[i], tmCh, &wg, dttmp, sess)
-	}
-	go func() {
-		wg.Wait()
-		close(tmCh)
-	}()
+func summaryTimemap(tmCh chan *list.List, sess *Session) (basetm *list.List) {
+	// Build link list for summary timemap including archive counts.
+	basetm = list.New()
+	return
+}
+
+func defaultTimemap(tmCh chan *list.List, sess *Session) (basetm *list.List) {
+	// Default Timemap format link list generation
 	basetm = list.New()
 	for newtm := range tmCh {
 		start := time.Now()
@@ -466,6 +459,34 @@ func aggregateTimemap(urir string, dttmp *time.Time, sess *Session) (basetm *lis
 		}
 		benchmarker("AGGREGATOR", "aggregate", fmt.Sprintf("%d Mementos accumulated and sorted", basetm.Len()), start, sess)
 	}
+	return
+}
+
+func aggregateTimemap(urir string, format string, dttmp *time.Time, sess *Session) (basetm *list.List) {
+	var wg sync.WaitGroup
+	tmCh := make(chan *list.List, len(archives))
+	for i, arch := range archives {
+		if i == *topk {
+			break
+		}
+		if arch.Dormant {
+			continue
+		}
+		wg.Add(1)
+		go fetchTimemap(urir, &archives[i], tmCh, &wg, dttmp, sess)
+	}
+	go func() {
+		wg.Wait()
+		close(tmCh)
+	}()
+	//
+	if format == "summary" {
+		basetm = summaryTimemap(tmCh, sess)
+		return
+	}else {
+		basetm = defaultTimemap(tmCh, sess)
+	}
+
 	return
 }
 
@@ -565,7 +586,7 @@ func memgatorCli(urir string, format string, dttmp *time.Time) {
 	defer benchmarker("SESSION", upsession, "Complete session", start, sess)
 	benchmarker("AGGREGATOR", "createsess", "Session created", start, sess)
 	logInfo.Printf("Aggregating Mementos for %s", urir)
-	basetm := aggregateTimemap(urir, dttmp, sess)
+	basetm := aggregateTimemap(urir, format, dttmp, sess)
 	if basetm.Len() == 0 {
 		return
 	}
@@ -589,7 +610,7 @@ func memgatorService(w http.ResponseWriter, r *http.Request, urir string, format
 	defer benchmarker("SESSION", upsession, "Complete session", start, sess)
 	benchmarker("AGGREGATOR", "createsess", "Session created", start, sess)
 	logInfo.Printf("Aggregating Mementos for %s", urir)
-	basetm := aggregateTimemap(urir, dttmp, sess)
+	basetm := aggregateTimemap(urir, format, dttmp, sess)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Expose-Headers", "Link, Location, X-Memento-Count, X-Generator")
 	if dttmp == nil {
