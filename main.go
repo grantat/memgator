@@ -77,6 +77,7 @@ var dormant = flag.Duration([]string{"d", "-dormant"}, time.Duration(15*time.Min
 // Session struct needs explanation, TODO
 type Session struct {
 	Start time.Time
+	Summary map[string]int
 }
 
 // Archive struct needs explanation, TODO
@@ -93,6 +94,9 @@ type Archive struct {
 
 // Archives struct needs explanation, TODO
 type Archives []Archive
+
+// Lock concurrent writes
+var lock = sync.RWMutex{}
 
 func (a Archives) Len() int {
 	return len(a)
@@ -264,6 +268,9 @@ func extractMementos(lnksplt chan string, sess *Session) (tml *list.List) {
 func fetchTimemap(urir string, arch *Archive, tmCh chan *list.List, wg *sync.WaitGroup, dttmp *time.Time, sess *Session) {
 	start := time.Now()
 	defer wg.Done()
+	lock.Lock()
+	sess.Summary[arch.ID] = 0
+	lock.Unlock()
 	url := arch.Timemap + urir
 	if dttmp != nil {
 		url = arch.Timegate + urir
@@ -327,6 +334,9 @@ func fetchTimemap(urir string, arch *Archive, tmCh chan *list.List, wg *sync.Wai
 	lnkrcvd <- lnks
 	go splitLinks(lnkrcvd, lnksplt)
 	tml := extractMementos(lnksplt, sess)
+	lock.Lock()
+	sess.Summary[arch.ID] = tml.Len()
+	lock.Unlock()
 	tmCh <- tml
 	benchmarker(arch.ID, "extractmementos", fmt.Sprintf("%d Mementos extracted from %s", tml.Len(), arch.Name), start, sess)
 	logInfo.Printf("%s => Success: %d mementos", arch.ID, tml.Len())
@@ -465,6 +475,7 @@ func defaultTimemap(tmCh chan *list.List, sess *Session) (basetm *list.List) {
 func aggregateTimemap(urir string, format string, dttmp *time.Time, sess *Session) (basetm *list.List) {
 	var wg sync.WaitGroup
 	tmCh := make(chan *list.List, len(archives))
+	tmpTmSummary := make(map[string]chan int)
 	for i, arch := range archives {
 		if i == *topk {
 			break
@@ -482,8 +493,7 @@ func aggregateTimemap(urir string, format string, dttmp *time.Time, sess *Sessio
 	//
 	if format == "summary" {
 		basetm = summaryTimemap(tmCh, sess)
-		return
-	}else {
+	} else {
 		basetm = defaultTimemap(tmCh, sess)
 	}
 
@@ -603,6 +613,8 @@ func memgatorService(w http.ResponseWriter, r *http.Request, urir string, format
 	start := time.Now()
 	sess := new(Session)
 	sess.Start = start
+	sum := make(map[string]int)
+	sess.Summary = sum
 	upsession := "timemap"
 	if dttmp != nil {
 		upsession = "timegate"
@@ -616,10 +628,29 @@ func memgatorService(w http.ResponseWriter, r *http.Request, urir string, format
 	if dttmp == nil {
 		w.Header().Set("X-Memento-Count", fmt.Sprintf("%d", basetm.Len()))
 	}
+
+	if format == "summary" {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Println("PRINTSUM")
+		for key, value := range sess.Summary {
+			fmt.Println("Key:", key, "Value:", value)
+		}
+		lock.Lock()
+		sum, err := json.Marshal(sess.Summary)
+		lock.Unlock()
+		if err != nil {
+			fmt.Println("error:", err)
+		}
+		fmt.Println(sum)
+		fmt.Fprint(w, string(sum))
+		return
+	}
+
 	if basetm.Len() == 0 {
 		http.NotFound(w, r)
 		return
 	}
+	fmt.Println(format)
 	navonly, closest := setNavRels(basetm, dttmp, sess)
 	if format == "redirect" {
 		http.Redirect(w, r, closest, http.StatusFound)
